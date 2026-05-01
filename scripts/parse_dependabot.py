@@ -46,47 +46,43 @@ def fetch_dependabot_alerts_gh(repo):
         f'/repos/{repo}/dependabot/alerts?state=open&per_page=100',
         '--paginate',
     ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        print('[WARN] gh CLI not found.')
+        return None
+    except subprocess.TimeoutExpired:
+        print('[WARN] gh CLI timed out.')
+        return None
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        print(f'[WARN] gh api failed (rc={result.returncode}): {stderr}')
+        return None
+
+    stdout = result.stdout.strip()
+    if not stdout:
+        return all_alerts
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        # --paginate may concatenate multiple JSON arrays; try wrapping
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        except FileNotFoundError:
-            print('[WARN] gh CLI not found.')
-            return None
-        except subprocess.TimeoutExpired:
-            print('[WARN] gh CLI timed out.')
+            data = json.loads(f'[{stdout.replace("][", ",")}]')
+        except json.JSONDecodeError as exc:
+            print(f'[WARN] Could not parse gh output: {exc}')
             return None
 
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            print(f'[WARN] gh api failed (rc={result.returncode}): {stderr}')
-            return None
-
-        stdout = result.stdout.strip()
-        if not stdout:
-            return all_alerts
-
-        try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError:
-            # --paginate may concatenate multiple JSON arrays; try wrapping
-            try:
-                data = json.loads(f'[{stdout.replace("][", ",")}]')
-            except json.JSONDecodeError as exc:
-                print(f'[WARN] Could not parse gh output: {exc}')
-                return None
-
-        if isinstance(data, list):
-            all_alerts.extend(data)
-        else:
-            all_alerts.append(data)
-
-
-        all_alerts.extend(alerts)
-        page += 1
+    if isinstance(data, list):
+        all_alerts.extend(data)
+    else:
+        all_alerts.append(data)
 
     return all_alerts
 
