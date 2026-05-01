@@ -3,16 +3,23 @@
 parse_dependabot.py
 Fetches open Dependabot alerts from the GitHub API and normalises
 them into the common findings JSON format used by aggregate_findings.py.
+
+Uses the `gh` CLI (pre-installed on GitHub-hosted runners) as the
+primary method because the default GITHUB_TOKEN cannot access the
+Dependabot alerts REST API via raw HTTP.  Falls back to `requests`
+for PAT-based usage outside of Actions.
 """
 import argparse
 import json
+import os
+import shutil
+import subprocess
 import sys
 
 try:
     import requests
 except ImportError:
-    print('[ERROR] requests library required — pip install requests')
-    sys.exit(1)
+    requests = None
 
 GITHUB_API = 'https://api.github.com'
 
@@ -24,38 +31,59 @@ SEVERITY_MAP = {
 }
 
 
-def fetch_dependabot_alerts(repo, token):
-    """Fetch all open Dependabot alerts for the given repository."""
-    url = f'{GITHUB_API}/repos/{repo}/dependabot/alerts'
-    headers = {
-        'Authorization': f'token {token}',
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-    }
-    params = {
-        'state': 'open',
-        'per_page': 100,
-    }
+# ── gh CLI approach (works with GITHUB_TOKEN on Actions runners) ─────
 
+def _gh_available():
+    return shutil.which('gh') is not None
+
+
+def fetch_dependabot_alerts_gh(repo):
+    """Fetch all open Dependabot alerts using the gh CLI."""
     all_alerts = []
-    page = 1
 
-    while True:
-        params['page'] = page
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
+    cmd = [
+        'gh', 'api',
+        f'/repos/{repo}/dependabot/alerts?state=open&per_page=100',
+        '--paginate',
+    ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except FileNotFoundError:
+            print('[WARN] gh CLI not found.')
+            return None
+        except subprocess.TimeoutExpired:
+            print('[WARN] gh CLI timed out.')
+            return None
 
-        if resp.status_code == 403:
-            print('[WARN] Dependabot alerts API returned 403 — check token permissions.')
-            break
-        if resp.status_code == 404:
-            print('[WARN] Dependabot alerts not enabled or repo not found.')
-            break
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            print(f'[WARN] gh api failed (rc={result.returncode}): {stderr}')
+            return None
 
-        resp.raise_for_status()
-        alerts = resp.json()
+        stdout = result.stdout.strip()
+        if not stdout:
+            return all_alerts
 
-        if not alerts:
-            break
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            # --paginate may concatenate multiple JSON arrays; try wrapping
+            try:
+                data = json.loads(f'[{stdout.replace("][", ",")}]')
+            except json.JSONDecodeError as exc:
+                print(f'[WARN] Could not parse gh output: {exc}')
+                return None
+
+        if isinstance(data, list):
+            all_alerts.extend(data)
+        else:
+            all_alerts.append(data)
+
 
         all_alerts.extend(alerts)
         page += 1
@@ -108,13 +136,26 @@ def normalise(alert, repo):
 def main():
     parser = argparse.ArgumentParser(description='Fetch and normalise Dependabot alerts')
     parser.add_argument('--repo', required=True, help='GitHub repository (owner/repo)')
-    parser.add_argument('--token', required=True, help='GitHub token with security_events scope')
+    parser.add_argument('--token', required=True, help='GitHub token')
     parser.add_argument('--output', required=True, help='Output JSON file path')
     args = parser.parse_args()
 
     print(f'[INFO] Fetching Dependabot alerts for {args.repo}')
-    alerts = fetch_dependabot_alerts(args.repo, args.token)
-    print(f'[INFO] Retrieved {len(alerts)} open Dependabot alerts')
+
+    alerts = None
+
+    # Prefer gh CLI — it works with the default GITHUB_TOKEN on Actions runners
+    if _gh_available():
+        print('[INFO] Using gh CLI to fetch Dependabot alerts ...')
+        alerts = fetch_dependabot_alerts_gh(args.repo)
+        if alerts is not None:
+            print(f'[INFO] gh CLI retrieved {len(alerts)} open Dependabot alerts')
+
+    # Fallback to requests (needs a PAT with security_events scope)
+    if alerts is None:
+        print('[INFO] Falling back to requests library ...')
+        alerts = fetch_dependabot_alerts_requests(args.repo, args.token)
+        print(f'[INFO] requests retrieved {len(alerts)} open Dependabot alerts')
 
     findings = [normalise(alert, args.repo) for alert in alerts]
 
