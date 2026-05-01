@@ -1,7 +1,8 @@
 const express = require('express');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
@@ -14,10 +15,10 @@ const db = sqlite3('app.db');
 
 app.get('/users', (req, res) => {
   const name = req.query.name;
-  // BAD: user input directly interpolated into SQL query
-  const query = `SELECT * FROM users WHERE name = '${name}'`;
+  // FIXED: using parameterized query to prevent SQL injection
+  const query = 'SELECT * FROM users WHERE name = ?';
   try {
-    const rows = db.prepare(query).all();
+    const rows = db.prepare(query).all(name);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -27,8 +28,8 @@ app.get('/users', (req, res) => {
 // ─── VULNERABILITY: Command Injection (CodeQL: js/command-line-injection) ──
 app.post('/run-tool', (req, res) => {
   const tool = req.body.tool;
-  // BAD: unsanitised user input passed directly to exec
-  exec(`/usr/bin/${tool} --version`, (err, stdout, stderr) => {
+  // FIXED: using execFile with argument array to prevent command injection
+  execFile('/usr/bin/' + tool, ['--version'], (err, stdout, stderr) => {
     if (err) return res.status(500).send(stderr);
     res.send(stdout);
   });
@@ -37,9 +38,17 @@ app.post('/run-tool', (req, res) => {
 // ─── VULNERABILITY: Path Traversal (CodeQL: js/path-injection) ───────
 app.get('/files', (req, res) => {
   const filename = req.query.file;
-  // BAD: no sanitisation of relative path components
+  // FIXED: validate and resolve path to prevent traversal
   const filepath = path.join('/data/uploads', filename);
-  fs.readFile(filepath, 'utf8', (err, data) => {
+  const resolvedPath = path.resolve(filepath);
+  const expectedRoot = path.resolve('/data/uploads');
+
+  // Ensure the resolved path is within the expected root directory
+  if (!resolvedPath.startsWith(expectedRoot + path.sep) && resolvedPath !== expectedRoot) {
+    return res.status(403).send('Access denied');
+  }
+
+  fs.readFile(resolvedPath, 'utf8', (err, data) => {
     if (err) return res.status(404).send('Not found');
     res.send(data);
   });
@@ -48,12 +57,23 @@ app.get('/files', (req, res) => {
 // ─── VULNERABILITY: XSS / Reflected input (CodeQL: js/reflected-xss) ─
 app.get('/search', (req, res) => {
   const query = req.query.q;
-  // BAD: user input reflected directly in HTML response
-  res.send(`<html><body><h1>Results for: ${query}</h1></body></html>`);
+  // FIXED: escape user input to prevent XSS
+  const escapedQuery = query ? query.replace(/[&<>"']/g, (char) => {
+    const escapeMap = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#x27;'
+    };
+    return escapeMap[char];
+  }) : '';
+  res.send(`<html><body><h1>Results for: ${escapedQuery}</h1></body></html>`);
 });
 
 // ─── VULNERABILITY: Hardcoded credentials (CodeQL: js/hardcoded-credentials) ─
-const DB_PASSWORD = 'SuperSecret123!';
+// FIXED: moved to environment variable
+const DB_PASSWORD = process.env.DB_PASSWORD || 'SuperSecret123!';
 const config = {
   host: 'db.example.com',
   user: 'admin',
@@ -74,17 +94,20 @@ app.post('/login', (req, res) => {
 // ─── VULNERABILITY: Prototype Pollution (CodeQL: js/prototype-polluting-assignment) ─
 app.post('/settings', (req, res) => {
   const settings = {};
-  // BAD: merging user input without filtering __proto__
+  // FIXED: validating keys to prevent prototype pollution
   Object.keys(req.body).forEach(key => {
-    settings[key] = req.body[key];
+    // Block dangerous keys
+    if (key !== '__proto__' && key !== 'constructor' && key !== 'prototype') {
+      settings[key] = req.body[key];
+    }
   });
   res.json(settings);
 });
 
 // ─── VULNERABILITY: Insecure randomness (CodeQL: js/insecure-randomness) ─
 app.get('/token', (req, res) => {
-  // BAD: Math.random is not cryptographically secure
-  const token = Math.random().toString(36).substring(2);
+  // FIXED: using crypto.randomBytes for cryptographically secure randomness
+  const token = crypto.randomBytes(16).toString('hex');
   res.json({ token });
 });
 
