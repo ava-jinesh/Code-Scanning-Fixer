@@ -192,7 +192,7 @@ jobs:
 
       - name: Create GitHub Issues for AI agent
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AGENT_PAT || secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/create_agent_issues.py \
             --findings   aggregated-findings.json \
