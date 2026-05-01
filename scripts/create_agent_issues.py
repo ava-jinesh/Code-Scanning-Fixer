@@ -53,6 +53,8 @@ ISSUE_BODY_TEMPLATE = """\
 
 ---
 
+{agent_mention}
+
 > **Instructions for the AI agent:**
 > 1. Check out this repository
 > 2. Locate `{file}` at line {line}
@@ -61,8 +63,16 @@ ISSUE_BODY_TEMPLATE = """\
 > 5. Open a Pull Request linking back to this Issue
 """
 
+# Agent @mention triggers — these go into the issue body so the agent picks it up
+AGENT_MENTIONS = {
+    'copilot': '@copilot',
+    'claude':  '@claude fix this issue',
+    'codex':   '@codex fix this issue',
+    'none':    '',
+}
 
-def create_issue(repo, token, finding, run_id, assignee=None):
+
+def create_issue(repo, token, finding, run_id, assignee=None, agent_name='none'):
     """Create a single GitHub Issue, optionally assigned to an AI agent."""
     url = f'{GITHUB_API}/repos/{repo}/issues'
     headers = {
@@ -75,6 +85,8 @@ def create_issue(repo, token, finding, run_id, assignee=None):
     source = finding.get('source', 'unknown')
     rule_id = finding.get('rule_id', 'N/A')
     file_path = finding.get('file', 'unknown')
+
+    agent_mention = AGENT_MENTIONS.get(agent_name, '')
 
     title = f'[{severity.upper()}] {source}: {rule_id} in {file_path}'
 
@@ -90,6 +102,7 @@ def create_issue(repo, token, finding, run_id, assignee=None):
         message=finding.get('message', 'No description provided.'),
         fix_hint=finding.get('fix_hint', 'Review and fix according to the rule documentation.'),
         help_url=finding.get('help_url', 'N/A'),
+        agent_mention=agent_mention,
     )
 
     labels = ['security', f'severity:{severity.lower()}', f'tool:{source}']
@@ -105,7 +118,9 @@ def create_issue(repo, token, finding, run_id, assignee=None):
     # Attempt 1: full payload
     resp = _post_issue(url, headers, payload)
     if resp.status_code == 201:
+        issue_data = resp.json()
         _log_created(resp)
+        _post_agent_comment(repo, token, headers, issue_data, agent_name)
         return True
 
     if resp.status_code != 422:
@@ -118,12 +133,13 @@ def create_issue(repo, token, finding, run_id, assignee=None):
 
     # Attempt 2: remove invalid assignee
     if 'assignees' in invalid_fields and 'assignees' in payload:
-        agent_name = payload['assignees'][0] if payload.get('assignees') else 'unknown'
-        print(f'[WARN] @{agent_name} assignee not available — creating unassigned issue.')
+        print(f'[WARN] @{assignee} assignee not available — creating unassigned issue with @mention.')
         payload.pop('assignees', None)
         resp = _post_issue(url, headers, payload)
         if resp.status_code == 201:
+            issue_data = resp.json()
             _log_created(resp, '(unassigned)')
+            _post_agent_comment(repo, token, headers, issue_data, agent_name)
             return True
 
     # Attempt 3: strip labels too
@@ -131,7 +147,9 @@ def create_issue(repo, token, finding, run_id, assignee=None):
         payload.pop('labels', None)
         resp = _post_issue(url, headers, payload)
         if resp.status_code == 201:
+            issue_data = resp.json()
             _log_created(resp, '(no labels)')
+            _post_agent_comment(repo, token, headers, issue_data, agent_name)
             return True
 
     print(f'[FAIL] Could not create issue after retries: {resp.status_code} {resp.text}')
@@ -145,6 +163,30 @@ def _post_issue(url, headers, payload):
 def _log_created(resp, note=''):
     issue_url = resp.json().get('html_url', '')
     print(f'[OK]   Created issue {note}: {issue_url}'.strip())
+
+
+def _post_agent_comment(repo, token, headers, issue_data, agent_name):
+    """Post a comment @mentioning the agent to trigger it."""
+    if agent_name == 'none' or not agent_name:
+        return
+    mention = AGENT_MENTIONS.get(agent_name, '')
+    if not mention:
+        return
+    issue_number = issue_data.get('number')
+    if not issue_number:
+        return
+    comment_url = f'{GITHUB_API}/repos/{repo}/issues/{issue_number}/comments'
+    comment_body = f'{mention}\n\nPlease fix the security vulnerability described in this issue.'
+    resp = requests.post(
+        comment_url,
+        headers=headers,
+        json={'body': comment_body},
+        timeout=30,
+    )
+    if resp.status_code == 201:
+        print(f'[OK]   Posted {mention} trigger comment on #{issue_number}')
+    else:
+        print(f'[WARN] Could not post agent comment on #{issue_number}: {resp.status_code}')
 
 
 def main():
@@ -174,7 +216,8 @@ def main():
 
     created = 0
     for finding in to_create:
-        ok = create_issue(args.repo, args.token, finding, args.run_id, assignee=assignee)
+        ok = create_issue(args.repo, args.token, finding, args.run_id,
+                          assignee=assignee, agent_name=args.assignee)
         if ok:
             created += 1
         # Respect GitHub API rate limits
