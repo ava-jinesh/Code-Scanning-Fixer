@@ -17,7 +17,7 @@
     "node-fetch": "2.6.1",
     "shell-quote": "1.7.2",
     "qs": "6.5.2",
-    "tar": "4.4.13"
+    "tar": "7.5.4"
   },
   "devDependencies": {
     "eslint": "^8.0.0"
