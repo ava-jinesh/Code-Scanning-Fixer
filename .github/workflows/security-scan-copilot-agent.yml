@@ -63,7 +63,15 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           output: codeql-results
-          upload: always
+          upload: never
+
+      - name: Upload SARIF to Code Scanning dashboard
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: codeql-results/javascript.sarif
+          category: security-scan-workflow
 
       - name: Convert SARIF to normalised JSON
         run: |
@@ -123,7 +131,7 @@ jobs:
 
       - name: Fetch Dependabot alerts via GitHub API
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.DEPENDABOT_PAT }}
         run: |
           python3 scripts/parse_dependabot.py \
             --repo   "${{ github.repository }}" \

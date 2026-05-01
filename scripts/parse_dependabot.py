@@ -87,6 +87,53 @@ def fetch_dependabot_alerts_gh(repo):
     return all_alerts
 
 
+# ── requests approach (works with PAT that has security_events scope) ─
+
+def fetch_dependabot_alerts_requests(repo, token):
+    """Fetch all open Dependabot alerts via requests (needs PAT)."""
+    if requests is None:
+        print('[ERROR] requests library required — pip install requests')
+        return []
+
+    url = f'{GITHUB_API}/repos/{repo}/dependabot/alerts'
+    headers = {
+        'Authorization': f'token {token}',
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+    params = {
+        'state': 'open',
+        'per_page': 100,
+    }
+
+    all_alerts = []
+    page = 1
+
+    while True:
+        params['page'] = page
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+
+        if resp.status_code == 403:
+            print('[WARN] Dependabot alerts API returned 403 — GITHUB_TOKEN '
+                  'cannot access Dependabot alerts. Create a PAT with '
+                  'security_events scope and store it as DEPENDABOT_PAT secret.')
+            break
+        if resp.status_code == 404:
+            print('[WARN] Dependabot alerts not enabled or repo not found.')
+            break
+
+        resp.raise_for_status()
+        alerts = resp.json()
+
+        if not alerts:
+            break
+
+        all_alerts.extend(alerts)
+        page += 1
+
+    return all_alerts
+
+
 def normalise(alert, repo):
     """Convert a Dependabot alert to the common finding format."""
     advisory = alert.get('security_advisory', {})
@@ -149,9 +196,14 @@ def main():
 
     # Fallback to requests (needs a PAT with security_events scope)
     if alerts is None:
-        print('[INFO] Falling back to requests library ...')
-        alerts = fetch_dependabot_alerts_requests(args.repo, args.token)
-        print(f'[INFO] requests retrieved {len(alerts)} open Dependabot alerts')
+        if requests is not None and args.token:
+            print('[INFO] Falling back to requests library ...')
+            alerts = fetch_dependabot_alerts_requests(args.repo, args.token)
+            print(f'[INFO] requests retrieved {len(alerts)} open Dependabot alerts')
+        else:
+            print('[WARN] No method available to fetch Dependabot alerts. '
+                  'Set DEPENDABOT_PAT secret with a PAT that has security_events scope.')
+            alerts = []
 
     findings = [normalise(alert, args.repo) for alert in alerts]
 
