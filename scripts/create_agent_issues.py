@@ -73,7 +73,7 @@ AGENT_MENTIONS = {
 
 
 def create_issue(repo, token, finding, run_id, assignee=None, agent_name='none'):
-    """Create a single GitHub Issue, optionally assigned to an AI agent."""
+    """Create a single GitHub Issue, then assign to the AI agent separately."""
     url = f'{GITHUB_API}/repos/{repo}/issues'
     headers = {
         'Authorization': f'token {token}',
@@ -107,53 +107,36 @@ def create_issue(repo, token, finding, run_id, assignee=None, agent_name='none')
 
     labels = ['security', f'severity:{severity.lower()}', f'tool:{source}']
 
+    # Step 1: Create issue WITHOUT assignee (avoids 422 validation)
     payload = {
         'title': title,
         'body': body,
         'labels': labels,
     }
-    if assignee:
-        payload['assignees'] = [assignee]
 
-    # Attempt 1: full payload
     resp = _post_issue(url, headers, payload)
-    if resp.status_code == 201:
-        issue_data = resp.json()
-        _log_created(resp)
-        _post_agent_comment(repo, token, headers, issue_data, agent_name)
-        return True
 
-    if resp.status_code != 422:
-        print(f'[FAIL] Could not create issue: {resp.status_code} {resp.text}')
-        return False
-
-    # Handle 422 — strip invalid fields and retry
-    errors = resp.json().get('errors', [])
-    invalid_fields = {e.get('field') for e in errors}
-
-    # Attempt 2: remove invalid assignee
-    if 'assignees' in invalid_fields and 'assignees' in payload:
-        print(f'[WARN] @{assignee} assignee not available — creating unassigned issue with @mention.')
-        payload.pop('assignees', None)
-        resp = _post_issue(url, headers, payload)
-        if resp.status_code == 201:
-            issue_data = resp.json()
-            _log_created(resp, '(unassigned)')
-            _post_agent_comment(repo, token, headers, issue_data, agent_name)
-            return True
-
-    # Attempt 3: strip labels too
+    # Retry without labels if they don't exist
     if resp.status_code == 422:
         payload.pop('labels', None)
         resp = _post_issue(url, headers, payload)
-        if resp.status_code == 201:
-            issue_data = resp.json()
-            _log_created(resp, '(no labels)')
-            _post_agent_comment(repo, token, headers, issue_data, agent_name)
-            return True
 
-    print(f'[FAIL] Could not create issue after retries: {resp.status_code} {resp.text}')
-    return False
+    if resp.status_code != 201:
+        print(f'[FAIL] Could not create issue: {resp.status_code} {resp.text}')
+        return False
+
+    issue_data = resp.json()
+    issue_number = issue_data.get('number')
+    _log_created(resp)
+
+    # Step 2: Assign agent via the assignment API (same as manual assignment)
+    if assignee:
+        _assign_agent(repo, headers, issue_number, assignee)
+
+    # Step 3: Post @mention comment as backup trigger
+    _post_agent_comment(repo, token, headers, issue_data, agent_name)
+
+    return True
 
 
 def _post_issue(url, headers, payload):
@@ -163,6 +146,22 @@ def _post_issue(url, headers, payload):
 def _log_created(resp, note=''):
     issue_url = resp.json().get('html_url', '')
     print(f'[OK]   Created issue {note}: {issue_url}'.strip())
+
+
+def _assign_agent(repo, headers, issue_number, assignee):
+    """Assign agent to issue using the assignment API (same as manual UI)."""
+    url = f'{GITHUB_API}/repos/{repo}/issues/{issue_number}/assignees'
+    resp = requests.post(
+        url,
+        headers=headers,
+        json={'assignees': [assignee]},
+        timeout=30,
+    )
+    if resp.status_code == 201:
+        print(f'[OK]   Assigned @{assignee} to #{issue_number}')
+    else:
+        print(f'[WARN] Could not assign @{assignee} to #{issue_number}: '
+              f'{resp.status_code} — issue created but unassigned')
 
 
 def _post_agent_comment(repo, token, headers, issue_data, agent_name):
