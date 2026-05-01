@@ -100,7 +100,32 @@ def create_issue(repo, token, finding, run_id):
         print(f'[OK]   Created issue: {issue_url}')
         return True
     elif resp.status_code == 422:
-        # Label may not exist — retry without custom labels
+        errors = resp.json().get('errors', [])
+        assignee_invalid = any(e.get('field') == 'assignees' for e in errors)
+
+        # Retry without assignee if @copilot is not available
+        if assignee_invalid:
+            print('[WARN] @copilot assignee not available — creating unassigned issue.')
+            payload.pop('assignees', None)
+            resp2 = requests.post(url, headers=headers, json=payload, timeout=30)
+            if resp2.status_code == 201:
+                issue_url = resp2.json().get('html_url', '')
+                print(f'[OK]   Created issue (unassigned): {issue_url}')
+                return True
+            elif resp2.status_code == 422:
+                # Labels may also not exist — retry with minimal labels
+                payload['labels'] = ['security']
+                resp3 = requests.post(url, headers=headers, json=payload, timeout=30)
+                if resp3.status_code == 201:
+                    issue_url = resp3.json().get('html_url', '')
+                    print(f'[OK]   Created issue (minimal): {issue_url}')
+                    return True
+                print(f'[FAIL] Could not create issue: {resp3.status_code} {resp3.text}')
+                return False
+            print(f'[FAIL] Could not create issue: {resp2.status_code} {resp2.text}')
+            return False
+
+        # Label validation error — retry without custom labels
         payload['labels'] = ['security']
         resp2 = requests.post(url, headers=headers, json=payload, timeout=30)
         if resp2.status_code == 201:
