@@ -1,0 +1,9 @@
+name: "Security scan CodeQL config"
+
+queries:
+  - uses: security-extended    # Broader set than default
+
+paths-ignore:
+  - node_modules
+  - '**/*.test.js'
+  - '**/*.spec.js'

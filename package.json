@@ -1,0 +1,25 @@
+{
+  "name": "code-scanning-fixer-demo",
+  "version": "1.0.0",
+  "description": "Demo app with intentional vulnerabilities for security scanning",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "express": "4.17.1",
+    "better-sqlite3": "7.4.3",
+    "lodash": "4.17.20",
+    "axios": "0.21.1",
+    "minimist": "1.2.5",
+    "jsonwebtoken": "8.5.1",
+    "node-fetch": "2.6.1",
+    "shell-quote": "1.7.2",
+    "qs": "6.5.2",
+    "tar": "4.4.13"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0"
+  }
+}

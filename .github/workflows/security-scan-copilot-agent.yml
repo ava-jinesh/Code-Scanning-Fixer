@@ -1,0 +1,207 @@
+# ──────────────────────────────────────────────────────────────────
+# Security Scan → Copilot Cloud Agent AutoFix
+# ──────────────────────────────────────────────────────────────────
+# Runs CodeQL, SonarQube, and Dependabot alert scans in parallel,
+# aggregates & deduplicates findings, then creates structured
+# GitHub Issues assigned to @copilot for autonomous fixing.
+# ──────────────────────────────────────────────────────────────────
+name: Security Code Scan Alerts AutoFix
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_issues:
+        description: 'Maximum number of issues to create for @copilot'
+        required: false
+        default: '10'
+      severity_threshold:
+        description: 'Minimum severity to act on (critical, high, medium, low, all)'
+        required: false
+        default: 'medium'
+        type: choice
+        options:
+          - all
+          - critical
+          - high
+          - medium
+          - low
+  schedule:
+    - cron: '0 6 * * 1'   # Weekly — Monday 06:00 UTC
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+  actions: read
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.12'
+
+# ─── Jobs ─────────────────────────────────────────────────────────
+jobs:
+
+  # ── 1. CodeQL Analysis ─────────────────────────────────────────
+  codeql-scan:
+    name: CodeQL Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          config-file: codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: codeql-results
+          upload: always
+
+      - name: Convert SARIF to normalised JSON
+        run: |
+          python3 scripts/parse_codeql_sarif.py \
+            --input  codeql-results/javascript.sarif \
+            --output codeql-findings.json
+
+      - name: Upload CodeQL findings
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-findings
+          path: codeql-findings.json
+          retention-days: 7
+
+  # ── 2. SonarQube Scan ──────────────────────────────────────────
+  # sonarqube-scan:
+  #   name: SonarQube Scan
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0    # full history for blame/new-code detection
+
+  #     - name: SonarQube Scan
+  #       uses: SonarSource/sonarqube-scan-action@v4
+  #       env:
+  #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  #         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  #     - name: Export SonarQube issues via API
+  #       env:
+  #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  #         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  #         SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+  #       run: |
+  #         python3 scripts/parse_sonarqube.py \
+  #           --host     "$SONAR_HOST_URL" \
+  #           --token    "$SONAR_TOKEN" \
+  #           --project  "$SONAR_PROJECT_KEY" \
+  #           --output   sonarqube-findings.json
+
+  #     - name: Upload SonarQube findings
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: sonarqube-findings
+  #         path: sonarqube-findings.json
+  #         retention-days: 7
+
+  # ── 3. Dependabot Alerts ───────────────────────────────────────
+  dependabot-alerts:
+    name: Dependabot Alerts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Dependabot alerts via GitHub API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/parse_dependabot.py \
+            --repo   "${{ github.repository }}" \
+            --token  "$GH_TOKEN" \
+            --output dependabot-findings.json
+
+      - name: Upload Dependabot findings
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependabot-findings
+          path: dependabot-findings.json
+          retention-days: 7
+
+  # ── 4. Aggregate & Create Issues for @copilot ──────────────────
+  aggregate-and-assign:
+    name: Aggregate Findings → Assign to Copilot
+    # needs: [codeql-scan, sonarqube-scan, dependabot-alerts]
+    needs: [codeql-scan, dependabot-alerts]   # skip SonarQube for now
+    if: always()        # run even if one scanner fails
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
+        run: pip install requests
+
+      - name: Download all scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: scan-results
+
+      - name: Aggregate & deduplicate findings
+        run: |
+          python3 scripts/aggregate_findings.py \
+            --input-dir   scan-results \
+            --output      aggregated-findings.json \
+            --min-severity "${{ github.event.inputs.severity_threshold || 'medium' }}"
+
+      - name: Create GitHub Issues assigned to @copilot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/create_agent_issues.py \
+            --findings   aggregated-findings.json \
+            --repo       "${{ github.repository }}" \
+            --token      "$GH_TOKEN" \
+            --max-issues "${{ github.event.inputs.max_issues || '10' }}" \
+            --run-id     "${{ github.run_id }}"
+
+      - name: Write job summary
+        run: |
+          echo "## 🔐 Security Scan Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f aggregated-findings.json ]; then
+            python3 -c "
+          import json, sys
+          with open('aggregated-findings.json') as f:
+              data = json.load(f)
+          s = data.get('summary', {})
+          print(f'| Metric | Count |')
+          print(f'|--------|-------|')
+          print(f'| Total findings | {s.get(\"total\", 0)} |')
+          print(f'| Critical | {s.get(\"critical\", 0)} |')
+          print(f'| High | {s.get(\"high\", 0)} |')
+          print(f'| Medium | {s.get(\"medium\", 0)} |')
+          print(f'| Low | {s.get(\"low\", 0)} |')
+          print(f'| Dependency vulnerabilities | {s.get(\"dependencies\", 0)} |')
+          print()
+          print(f'**Issues created for @copilot:** {s.get(\"issues_to_create\", 0)}')
+          " >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No findings file generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
