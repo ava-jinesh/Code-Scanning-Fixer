@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       max_issues:
-        description: 'Maximum number of issues to create for @copilot'
+        description: 'Maximum number of issues to create'
         required: false
         default: '10'
       severity_threshold:
@@ -25,6 +25,16 @@ on:
           - high
           - medium
           - low
+      assignee:
+        description: 'AI agent to assign issues to (copilot, claude, codex, or none)'
+        required: false
+        default: 'copilot'
+        type: choice
+        options:
+          - copilot
+          - claude
+          - codex
+          - none
   schedule:
     - cron: '0 6 * * 1'   # Weekly — Monday 06:00 UTC
 
@@ -179,7 +189,7 @@ jobs:
             --output      aggregated-findings.json \
             --min-severity "${{ github.event.inputs.severity_threshold || 'medium' }}"
 
-      - name: Create GitHub Issues assigned to @copilot
+      - name: Create GitHub Issues for AI agent
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -188,7 +198,8 @@ jobs:
             --repo       "${{ github.repository }}" \
             --token      "$GH_TOKEN" \
             --max-issues "${{ github.event.inputs.max_issues || '10' }}" \
-            --run-id     "${{ github.run_id }}"
+            --run-id     "${{ github.run_id }}" \
+            --assignee   "${{ github.event.inputs.assignee || 'copilot' }}"
 
       - name: Write job summary
         run: |

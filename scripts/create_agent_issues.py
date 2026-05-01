@@ -2,7 +2,7 @@
 """
 create_agent_issues.py
 Reads the aggregated findings JSON and creates one GitHub Issue per
-finding, assigned to @copilot for autonomous fixing.
+finding, assigned to an AI agent (copilot, claude, codex) for autonomous fixing.
 """
 import argparse
 import json
@@ -17,6 +17,14 @@ except ImportError:
     sys.exit(1)
 
 GITHUB_API = 'https://api.github.com'
+
+# Map agent names to GitHub assignee usernames
+AGENT_ASSIGNEES = {
+    'copilot': 'copilot',
+    'claude':  'claude',
+    'codex':   'codex',
+    'none':    None,
+}
 
 ISSUE_BODY_TEMPLATE = """\
 ## Security Finding — {source} ({severity})
@@ -45,7 +53,7 @@ ISSUE_BODY_TEMPLATE = """\
 
 ---
 
-> **Instructions for @copilot:**
+> **Instructions for the AI agent:**
 > 1. Check out this repository
 > 2. Locate `{file}` at line {line}
 > 3. Apply the suggested fix following `.github/copilot-instructions.md`
@@ -54,8 +62,8 @@ ISSUE_BODY_TEMPLATE = """\
 """
 
 
-def create_issue(repo, token, finding, run_id):
-    """Create a single GitHub Issue assigned to @copilot."""
+def create_issue(repo, token, finding, run_id, assignee=None):
+    """Create a single GitHub Issue, optionally assigned to an AI agent."""
     url = f'{GITHUB_API}/repos/{repo}/issues'
     headers = {
         'Authorization': f'token {token}',
@@ -84,68 +92,71 @@ def create_issue(repo, token, finding, run_id):
         help_url=finding.get('help_url', 'N/A'),
     )
 
-    labels = ['security', f'severity:{severity.lower()}', f'tool:{source}', 'copilot-autofix']
+    labels = ['security', f'severity:{severity.lower()}', f'tool:{source}']
 
     payload = {
         'title': title,
         'body': body,
-        'assignees': ['copilot'],
         'labels': labels,
     }
+    if assignee:
+        payload['assignees'] = [assignee]
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
-
+    # Attempt 1: full payload
+    resp = _post_issue(url, headers, payload)
     if resp.status_code == 201:
-        issue_url = resp.json().get('html_url', '')
-        print(f'[OK]   Created issue: {issue_url}')
+        _log_created(resp)
         return True
-    elif resp.status_code == 422:
-        errors = resp.json().get('errors', [])
-        assignee_invalid = any(e.get('field') == 'assignees' for e in errors)
 
-        # Retry without assignee if @copilot is not available
-        if assignee_invalid:
-            print('[WARN] @copilot assignee not available — creating unassigned issue.')
-            payload.pop('assignees', None)
-            resp2 = requests.post(url, headers=headers, json=payload, timeout=30)
-            if resp2.status_code == 201:
-                issue_url = resp2.json().get('html_url', '')
-                print(f'[OK]   Created issue (unassigned): {issue_url}')
-                return True
-            elif resp2.status_code == 422:
-                # Labels may also not exist — retry with minimal labels
-                payload['labels'] = ['security']
-                resp3 = requests.post(url, headers=headers, json=payload, timeout=30)
-                if resp3.status_code == 201:
-                    issue_url = resp3.json().get('html_url', '')
-                    print(f'[OK]   Created issue (minimal): {issue_url}')
-                    return True
-                print(f'[FAIL] Could not create issue: {resp3.status_code} {resp3.text}')
-                return False
-            print(f'[FAIL] Could not create issue: {resp2.status_code} {resp2.text}')
-            return False
-
-        # Label validation error — retry without custom labels
-        payload['labels'] = ['security']
-        resp2 = requests.post(url, headers=headers, json=payload, timeout=30)
-        if resp2.status_code == 201:
-            issue_url = resp2.json().get('html_url', '')
-            print(f'[OK]   Created issue (minimal labels): {issue_url}')
-            return True
-        print(f'[FAIL] Could not create issue: {resp2.status_code} {resp2.text}')
-        return False
-    else:
+    if resp.status_code != 422:
         print(f'[FAIL] Could not create issue: {resp.status_code} {resp.text}')
         return False
 
+    # Handle 422 — strip invalid fields and retry
+    errors = resp.json().get('errors', [])
+    invalid_fields = {e.get('field') for e in errors}
+
+    # Attempt 2: remove invalid assignee
+    if 'assignees' in invalid_fields and 'assignees' in payload:
+        agent_name = payload['assignees'][0] if payload.get('assignees') else 'unknown'
+        print(f'[WARN] @{agent_name} assignee not available — creating unassigned issue.')
+        payload.pop('assignees', None)
+        resp = _post_issue(url, headers, payload)
+        if resp.status_code == 201:
+            _log_created(resp, '(unassigned)')
+            return True
+
+    # Attempt 3: strip labels too
+    if resp.status_code == 422:
+        payload.pop('labels', None)
+        resp = _post_issue(url, headers, payload)
+        if resp.status_code == 201:
+            _log_created(resp, '(no labels)')
+            return True
+
+    print(f'[FAIL] Could not create issue after retries: {resp.status_code} {resp.text}')
+    return False
+
+
+def _post_issue(url, headers, payload):
+    return requests.post(url, headers=headers, json=payload, timeout=30)
+
+
+def _log_created(resp, note=''):
+    issue_url = resp.json().get('html_url', '')
+    print(f'[OK]   Created issue {note}: {issue_url}'.strip())
+
 
 def main():
-    parser = argparse.ArgumentParser(description='Create GitHub Issues for Copilot agent')
+    parser = argparse.ArgumentParser(description='Create GitHub Issues for AI agent')
     parser.add_argument('--findings', required=True, help='Path to aggregated findings JSON')
     parser.add_argument('--repo', required=True, help='GitHub repository (owner/repo)')
     parser.add_argument('--token', required=True, help='GitHub token with issues:write')
     parser.add_argument('--max-issues', type=int, default=10, help='Maximum issues to create')
     parser.add_argument('--run-id', default='manual', help='GitHub Actions run ID')
+    parser.add_argument('--assignee', default='copilot',
+                        choices=['copilot', 'claude', 'codex', 'none'],
+                        help='AI agent to assign issues to')
     args = parser.parse_args()
 
     with open(args.findings, 'r', encoding='utf-8') as f:
@@ -156,8 +167,20 @@ def main():
         print('[INFO] No findings to process. Exiting.')
         return
 
+    assignee = AGENT_ASSIGNEES.get(args.assignee)
+    agent_label = f'@{args.assignee}' if assignee else 'no agent'
     to_create = findings[:args.max_issues]
-    print(f'[INFO] Creating {len(to_create)} issues (max {args.max_issues}) assigned to @copilot ...')
+    print(f'[INFO] Creating {len(to_create)} issues (max {args.max_issues}) assigned to {agent_label} ...')
+
+    created = 0
+    for finding in to_create:
+        ok = create_issue(args.repo, args.token, finding, args.run_id, assignee=assignee)
+        if ok:
+            created += 1
+        # Respect GitHub API rate limits
+        time.sleep(1)
+
+    print(f'[INFO] Done. Created {created}/{len(to_create)} issues.')
 
     created = 0
     for finding in to_create:
