@@ -74,9 +74,12 @@ app.post('/login', (req, res) => {
 // ─── VULNERABILITY: Prototype Pollution (CodeQL: js/prototype-polluting-assignment) ─
 app.post('/settings', (req, res) => {
   const settings = {};
-  // BAD: merging user input without filtering __proto__
+  // FIXED: Filter dangerous property names to prevent prototype pollution
+  const dangerousKeys = ['__proto__', 'constructor', 'prototype'];
   Object.keys(req.body).forEach(key => {
-    settings[key] = req.body[key];
+    if (!dangerousKeys.includes(key)) {
+      settings[key] = req.body[key];
+    }
   });
   res.json(settings);
 });
