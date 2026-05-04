@@ -11,7 +11,7 @@
     "express": "4.17.1",
     "better-sqlite3": "7.4.3",
     "lodash": "4.17.20",
-    "axios": "0.21.1",
+    "axios": "0.31.0",
     "minimist": "1.2.5",
     "jsonwebtoken": "8.5.1",
     "node-fetch": "2.6.1",
